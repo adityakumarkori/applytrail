@@ -25,6 +25,7 @@ unknown fields become None/"unknown", never invented values.
 
 import os
 import re
+import urllib.parse
 from datetime import datetime, timezone
 
 import requests
@@ -58,10 +59,28 @@ def _now_iso():
 
 
 def _sanitize(message, secrets):
+    """Redact secrets from error text, including URL-encoded forms.
+
+    Request libraries percent-encode query params, so an error string
+    may carry ``quote``/``quote_plus`` spellings of a key instead of the
+    raw value. All spellings are replaced, longest first, so a short
+    secret can never corrupt (and thereby preserve part of) a longer
+    encoded form. Pure stdlib, never raises.
+    """
     text = str(message)
+    variants = set()
     for secret in secrets:
-        if secret:
-            text = text.replace(secret, "***")
+        if not secret:
+            continue
+        variants.add(secret)
+        try:
+            variants.add(urllib.parse.quote(secret, safe=""))
+            variants.add(urllib.parse.quote_plus(secret))
+        except Exception:
+            pass
+    for variant in sorted(variants, key=len, reverse=True):
+        if variant:
+            text = text.replace(variant, "***")
     return text
 
 
@@ -75,7 +94,15 @@ def _get_json(url, params=None, timeout=None, label="source"):
             headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
             timeout=timeout,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            if getattr(response, "status_code", None) == 429:
+                raise SourceError(
+                    f"{label} rate limited (HTTP 429 — too many requests; "
+                    "wait a while before fetching again)"
+                ) from exc
+            raise SourceError(f"{label} request failed: {exc}") from exc
         return response.json()
     except SourceError:
         raise
@@ -415,38 +442,52 @@ def fetch_all_jobs(
     adzuna_country="in",
     adzuna_location="India",
 ):
-    """Aggregate all sources; per-source failures are recorded, not raised."""
+    """Aggregate all sources; per-source failures are recorded, not raised.
+
+    Adds ``source_counts`` (jobs returned per successful source) and
+    ``adzuna_configured`` so callers can tell zero results apart from
+    failure and from a missing Adzuna key. Counts are pre-deduplication;
+    ``jobs`` remains deduplicated.
+    """
     fetched_at = _now_iso()
     jobs, errors = [], []
     attempted = ["arbeitnow", "remoteok", "remotive", "adzuna"]
+    counts = {}
+    adzuna_id, adzuna_key = _adzuna_credentials(adzuna_app_id, adzuna_app_key)
 
     try:
-        jobs.extend(fetch_arbeitnow(query, limit_per_source, timeout))
+        found = fetch_arbeitnow(query, limit_per_source, timeout)
+        jobs.extend(found)
+        counts["arbeitnow"] = len(found)
     except Exception as exc:
         errors.append({"source": "arbeitnow", "error": str(exc)})
 
     try:
-        jobs.extend(fetch_remoteok(query, limit_per_source, timeout))
+        found = fetch_remoteok(query, limit_per_source, timeout)
+        jobs.extend(found)
+        counts["remoteok"] = len(found)
     except Exception as exc:
         errors.append({"source": "remoteok", "error": str(exc)})
 
     try:
-        jobs.extend(fetch_remotive(query, limit_per_source, timeout))
+        found = fetch_remotive(query, limit_per_source, timeout)
+        jobs.extend(found)
+        counts["remotive"] = len(found)
     except Exception as exc:
         errors.append({"source": "remotive", "error": str(exc)})
 
     try:
-        jobs.extend(
-            fetch_adzuna(
-                query,
-                location=adzuna_location,
-                limit=limit_per_source,
-                timeout=timeout,
-                app_id=adzuna_app_id,
-                app_key=adzuna_app_key,
-                country=adzuna_country,
-            )
+        found = fetch_adzuna(
+            query,
+            location=adzuna_location,
+            limit=limit_per_source,
+            timeout=timeout,
+            app_id=adzuna_app_id,
+            app_key=adzuna_app_key,
+            country=adzuna_country,
         )
+        jobs.extend(found)
+        counts["adzuna"] = len(found)
     except Exception as exc:
         errors.append({"source": "adzuna", "error": str(exc)})
 
@@ -454,5 +495,7 @@ def fetch_all_jobs(
         "jobs": deduplicate(jobs),
         "errors": errors,
         "sources_attempted": attempted,
+        "source_counts": counts,
+        "adzuna_configured": bool(adzuna_id and adzuna_key),
         "fetched_at": fetched_at,
     }
