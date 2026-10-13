@@ -110,6 +110,40 @@ def test_no_nan_or_bool_leaks_into_numbers():
     assert not math.isnan(clean["exp_pref_min"])
 
 
+def test_empty_profile_produces_zero_warnings_with_defaults():
+    clean, warnings = sanitize_profile({})
+    assert warnings == []
+    assert clean == {
+        "exp_pref_min": 0.0,
+        "exp_pref_max": 2.0,
+        "query": "java",
+        "skills": [],
+        "experience_years": None,
+        "target_roles": [],
+        "min_score": 0,
+        "posted_within": None,
+    }
+
+
+def test_missing_keys_use_defaults_silently():
+    clean, warnings = sanitize_profile({"query": "spring", "skills": ["java"]})
+    assert warnings == []
+    assert (clean["exp_pref_min"], clean["exp_pref_max"]) == (0.0, 2.0)
+    assert clean["experience_years"] is None
+    assert clean["query"] == "spring"
+    assert clean["skills"] == ["java"]
+
+
+def test_present_but_invalid_prefs_still_warn():
+    clean, warnings = sanitize_profile({"exp_pref_min": -1})
+    assert (clean["exp_pref_min"], clean["exp_pref_max"]) == (0.0, 2.0)
+    assert len(warnings) == 1
+    assert "minimum" in warnings[0].lower()
+    clean, warnings = sanitize_profile({"exp_pref_min": 5})
+    assert (clean["exp_pref_min"], clean["exp_pref_max"]) == (0.0, 2.0)
+    assert warnings  # inverted range against the silent default still resets
+
+
 def test_new_fields_valid_values_preserved():
     clean, warnings = sanitize_profile(
         {

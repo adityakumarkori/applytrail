@@ -65,8 +65,10 @@ def sanitize_profile(profile):
 
     Returns (clean_profile, warnings). Invalid preference fields are
     restored to the documented 0–2-year defaults; valid fields are
-    preserved. Unknown candidate experience stays None (never zero).
-    Nothing is written back — saving happens only on explicit fetch.
+    preserved. Absent keys silently receive defaults (a fresh install
+    is not warned about). Unknown candidate experience stays None
+    (never zero). Nothing is written back — saving happens only on
+    explicit fetch.
     """
     clean = {
         "exp_pref_min": _PREF_MIN_DEFAULT,
@@ -81,18 +83,24 @@ def sanitize_profile(profile):
     if not isinstance(profile, dict):
         return clean, ["Saved profile was unreadable — restored safe defaults."]
     warnings = []
-    lo, lo_ok = _coerce_pref(profile.get("exp_pref_min"), _PREF_MIN_DEFAULT)
-    hi, hi_ok = _coerce_pref(profile.get("exp_pref_max"), _PREF_MAX_DEFAULT)
-    if not lo_ok:
-        warnings.append(
-            "Saved minimum experience was invalid — restored to "
-            f"{_PREF_MIN_DEFAULT:g} years."
-        )
-    if not hi_ok:
-        warnings.append(
-            "Saved maximum experience was invalid — restored to "
-            f"{_PREF_MAX_DEFAULT:g} years."
-        )
+    if "exp_pref_min" in profile:
+        lo, lo_ok = _coerce_pref(profile["exp_pref_min"], _PREF_MIN_DEFAULT)
+        if not lo_ok:
+            warnings.append(
+                "Saved minimum experience was invalid — restored to "
+                f"{_PREF_MIN_DEFAULT:g} years."
+            )
+    else:
+        lo, lo_ok = _PREF_MIN_DEFAULT, True
+    if "exp_pref_max" in profile:
+        hi, hi_ok = _coerce_pref(profile["exp_pref_max"], _PREF_MAX_DEFAULT)
+        if not hi_ok:
+            warnings.append(
+                "Saved maximum experience was invalid — restored to "
+                f"{_PREF_MAX_DEFAULT:g} years."
+            )
+    else:
+        hi, hi_ok = _PREF_MAX_DEFAULT, True
     if lo_ok and hi_ok and lo > hi:
         lo, hi = _PREF_MIN_DEFAULT, _PREF_MAX_DEFAULT
         warnings.append(
