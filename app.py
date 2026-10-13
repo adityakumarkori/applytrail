@@ -230,6 +230,28 @@ def save_preferences(payload):
     return storage.save_store("profile", payload)
 
 
+def save_fetch_cache(query, fetched_jobs, fetched_at, profile_payload):
+    """Persist fetch cache + profile snapshot. Returns error strings.
+
+    The two stores are independent atomic writes, not one transaction:
+    each is attempted regardless of the other, and each failure names
+    its store. Pure I/O, no network.
+    """
+    errors = []
+    try:
+        storage.save_store(
+            "cached_jobs",
+            {"fetched_at": fetched_at, "query": query, "jobs": fetched_jobs},
+        )
+    except _PERSISTENCE_ERRORS as exc:
+        errors.append(f"cached jobs: {exc}")
+    try:
+        storage.save_store("profile", profile_payload)
+    except _PERSISTENCE_ERRORS as exc:
+        errors.append(f"profile: {exc}")
+    return errors
+
+
 # Expected persistence failures handled as controlled results (never
 # a bare Exception catch: programming errors must stay visible).
 _PERSISTENCE_ERRORS = (storage.StorageError, OSError, TypeError)
@@ -357,7 +379,7 @@ def _toggle_saved(key, should_save, job=None, match=None):
         else:
             updated = tracking.remove_job(doc, key)
         storage.save_store("saved_jobs", updated)
-    except (ValueError, storage.StorageError) as exc:
+    except (ValueError, *_PERSISTENCE_ERRORS) as exc:
         st.error(f"Could not update saved jobs: {exc}")
         return
     st.rerun()
@@ -694,9 +716,7 @@ def main():
             )
             save_preferences(payload)
             st.success("Preferences saved locally (no jobs fetched).")
-        except ValueError as exc:
-            st.error(f"Preferences not saved: {exc}")
-        except storage.StorageError as exc:
+        except (ValueError, *_PERSISTENCE_ERRORS) as exc:
             st.error(f"Preferences not saved: {exc}")
 
     # ---------------------------------------------------------- saved page branch
@@ -718,30 +738,26 @@ def main():
             st.session_state["raw_jobs"] = fetched["jobs"]
             st.session_state["fetch_errors"] = fetched["errors"]
             st.session_state["fetched_at"] = fetched["fetched_at"]
-            try:
-                storage.save_store(
-                    "cached_jobs",
-                    {
-                        "fetched_at": fetched["fetched_at"],
-                        "query": query,
-                        "jobs": fetched["jobs"],
-                    },
+            cache_errors = save_fetch_cache(
+                query,
+                fetched["jobs"],
+                fetched["fetched_at"],
+                {
+                    "exp_pref_min": pref_min,
+                    "exp_pref_max": pref_max,
+                    "query": query,
+                    "skills": candidate["skills"],
+                    "experience_years": candidate["experience_years"],
+                    "target_roles": parse_target_roles(roles_text),
+                    "min_score": min_score,
+                    "posted_within": _POSTED_WITHIN_DAYS[recency_label],
+                },
+            )
+            if cache_errors:
+                st.warning(
+                    "Fetched jobs shown, but local cache failed: "
+                    + "; ".join(cache_errors)
                 )
-                storage.save_store(
-                    "profile",
-                    {
-                        "exp_pref_min": pref_min,
-                        "exp_pref_max": pref_max,
-                        "query": query,
-                        "skills": candidate["skills"],
-                        "experience_years": candidate["experience_years"],
-                        "target_roles": parse_target_roles(roles_text),
-                        "min_score": min_score,
-                        "posted_within": _POSTED_WITHIN_DAYS[recency_label],
-                    },
-                )
-            except storage.StorageError as exc:
-                st.warning(f"Fetched jobs shown, but local cache failed: {exc}")
             st.success(
                 f"Fetched {len(fetched['jobs'])} jobs "
                 f"({', '.join(fetched['sources_attempted'])})."
