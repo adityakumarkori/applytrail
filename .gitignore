@@ -1,0 +1,19 @@
+# Local data / secrets — never commit personal data
+data/*.json
+data/*.bak
+data/*.corrupted.*
+uploads/*.pdf
+uploads/*
+!uploads/.gitkeep
+!data/.gitkeep
+.streamlit/secrets.toml
+.env
+.env.*
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
