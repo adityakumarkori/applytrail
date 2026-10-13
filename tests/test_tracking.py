@@ -256,3 +256,97 @@ def test_widget_keys_unique_and_safe():
     }
     assert len(keys) == 4
     assert all(set(key) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.") for key in keys)
+
+
+def test_oserror_on_first_store_reported_second_still_attempted(monkeypatch):
+    import storage
+
+    from app import save_tracking_state
+
+    calls = []
+
+    def fake_save(name, data):
+        calls.append(name)
+        if name == "saved_jobs":
+            raise OSError("disk full (simulated)")
+
+    monkeypatch.setattr("storage.save_store", fake_save)
+    ok, errors = save_tracking_state(
+        {"version": 1, "jobs": {}}, {"version": 1, "applications": {}}
+    )
+    assert ok is False
+    assert any("saved jobs" in error for error in errors)
+    assert calls == ["saved_jobs", "applications"]
+
+
+def test_oserror_on_second_store_reports_partial_failure(monkeypatch):
+    import storage
+
+    from app import save_tracking_state
+
+    written = {}
+
+    def fake_save(name, data):
+        if name == "applications":
+            raise OSError("read-only filesystem (simulated)")
+        written[name] = data
+
+    monkeypatch.setattr("storage.save_store", fake_save)
+    ok, errors = save_tracking_state(
+        {"version": 1, "jobs": {"k": 1}}, {"version": 1, "applications": {}}
+    )
+    assert ok is False
+    assert any("applications" in error for error in errors)
+    assert written["saved_jobs"] == {"version": 1, "jobs": {"k": 1}}
+
+
+def test_genuine_typeerror_from_unserializable_payload(monkeypatch):
+    import json
+
+    from app import save_tracking_state
+
+    def real_json_save(name, data):
+        json.dumps(data)  # raises TypeError for sets and friends
+
+    monkeypatch.setattr("storage.save_store", real_json_save)
+    ok, errors = save_tracking_state({"version": 1, "jobs": {1, 2}}, {})
+    assert ok is False
+    assert any("saved jobs" in error for error in errors)
+
+
+def test_retry_after_failure_is_safe_and_duplicate_free(monkeypatch):
+    import storage
+
+    from app import save_tracking_state
+
+    backing = {}
+    failures = {"applications": 1}
+
+    def fake_save(name, data):
+        if failures.get(name, 0):
+            failures[name] -= 1
+            raise OSError("transient failure (simulated)")
+        backing[name] = copy.deepcopy(data)
+
+    monkeypatch.setattr("storage.save_store", fake_save)
+    saved = {"version": 1, "jobs": {"k": {"job": {"title": "T"}}}}
+    apps = {"version": 1, "applications": {"k": {"status": "Applied"}}}
+    ok, errors = save_tracking_state(saved, apps)
+    assert ok is False and errors
+    assert backing["saved_jobs"] == saved
+    assert "applications" not in backing  # failed write persisted nothing
+    ok, errors = save_tracking_state(saved, apps)
+    assert (ok, errors) == (True, [])
+    assert backing["saved_jobs"] == saved
+    assert backing["applications"] == apps
+
+
+def test_unexpected_errors_still_propagate(monkeypatch):
+    from app import save_tracking_state
+
+    def buggy_save(name, data):
+        raise RuntimeError("programming error (simulated)")
+
+    monkeypatch.setattr("storage.save_store", buggy_save)
+    with pytest.raises(RuntimeError):
+        save_tracking_state({}, {})

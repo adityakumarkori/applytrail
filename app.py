@@ -230,22 +230,29 @@ def save_preferences(payload):
     return storage.save_store("profile", payload)
 
 
+# Expected persistence failures handled as controlled results (never
+# a bare Exception catch: programming errors must stay visible).
+_PERSISTENCE_ERRORS = (storage.StorageError, OSError, TypeError)
+
+
 def save_tracking_state(saved_data, applications_data):
     """Write both tracking stores, reporting partial failures honestly.
 
     Returns (ok, errors). A failed store is named explicitly so the UI
     never claims an update was persisted when it was not. Safe retry:
     successfully written data stays intact; only rerun the failed part.
-    Pure I/O, no network.
+    Handles storage errors, filesystem failures (including atomic
+    directory/replace failures), and unserializable payloads. Pure I/O,
+    no network.
     """
     errors = []
     try:
         storage.save_store("saved_jobs", saved_data)
-    except storage.StorageError as exc:
+    except _PERSISTENCE_ERRORS as exc:
         errors.append(f"saved jobs: {exc}")
     try:
         storage.save_store("applications", applications_data)
-    except storage.StorageError as exc:
+    except _PERSISTENCE_ERRORS as exc:
         errors.append(f"applications: {exc}")
     return (not errors), errors
 
