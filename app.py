@@ -9,6 +9,7 @@ the single request and never persisted or displayed.
 """
 
 import math
+import re
 
 import streamlit as st
 
@@ -18,6 +19,7 @@ from core import filters as job_filters
 from core import jobs as job_sources
 from core import match as matcher
 from core import resume as resume_parser
+from core import tracking
 from core import views
 from core.skills import SKILL_CANONICAL
 
@@ -228,6 +230,32 @@ def save_preferences(payload):
     return storage.save_store("profile", payload)
 
 
+def save_tracking_state(saved_data, applications_data):
+    """Write both tracking stores, reporting partial failures honestly.
+
+    Returns (ok, errors). A failed store is named explicitly so the UI
+    never claims an update was persisted when it was not. Safe retry:
+    successfully written data stays intact; only rerun the failed part.
+    Pure I/O, no network.
+    """
+    errors = []
+    try:
+        storage.save_store("saved_jobs", saved_data)
+    except storage.StorageError as exc:
+        errors.append(f"saved jobs: {exc}")
+    try:
+        storage.save_store("applications", applications_data)
+    except storage.StorageError as exc:
+        errors.append(f"applications: {exc}")
+    return (not errors), errors
+
+
+def widget_key(key, prefix, position):
+    """Stable unique Streamlit key for repeated job controls (pure)."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(key or f"nokey-{position}"))[:60]
+    return f"{prefix}-{safe}-{position}"
+
+
 # ---------------------------------------------------------------- pure pipeline
 def build_results(raw_jobs, candidate, pref_min, pref_max):
     """Filter + rank + attach reasons/flags. Pure: no network, no I/O."""
@@ -258,6 +286,36 @@ def load_profile():
     return profile if isinstance(profile, dict) else {}
 
 
+def load_saved_jobs():
+    """Load saved snapshots; returns (jobs, skipped, warning_or_None)."""
+    try:
+        raw = storage.load_store(
+            "saved_jobs", default={"version": 1, "jobs": {}}
+        )
+    except storage.StorageError as exc:
+        return {}, 0, f"Saved jobs unavailable: {exc}"
+    kept, skipped = tracking.clean_saved_store(raw)
+    warning = (
+        f"Skipped {skipped} malformed saved records." if skipped else None
+    )
+    return kept, skipped, warning
+
+
+def load_applications():
+    """Load application records; returns (records, skipped, warning_or_None)."""
+    try:
+        raw = storage.load_store(
+            "applications", default={"version": 1, "applications": {}}
+        )
+    except storage.StorageError as exc:
+        return {}, 0, f"Applications unavailable: {exc}"
+    kept, skipped = tracking.clean_application_store(raw)
+    warning = (
+        f"Skipped {skipped} malformed application records." if skipped else None
+    )
+    return kept, skipped, warning
+
+
 # ---------------------------------------------------------------- UI pieces
 def _candidate_from_resume(parsed, edited_skills):
     return {
@@ -282,7 +340,23 @@ def _candidate_from_manual(skills, exp_mode, exp_years):
     }
 
 
-def _render_card(entry):
+def _toggle_saved(key, should_save, job=None, match=None):
+    """Save or remove one snapshot, then rerun. Network-free."""
+    try:
+        saved, _, _ = load_saved_jobs()
+        doc = {"version": 1, "jobs": saved}
+        if should_save:
+            updated = tracking.save_job(doc, job, match)
+        else:
+            updated = tracking.remove_job(doc, key)
+        storage.save_store("saved_jobs", updated)
+    except (ValueError, storage.StorageError) as exc:
+        st.error(f"Could not update saved jobs: {exc}")
+        return
+    st.rerun()
+
+
+def _render_card(entry, saved_keys=frozenset(), position=0):
     job, match = entry["job"], entry["match"]
     title = job.get("title") or "Untitled role"
     company = job.get("company")
@@ -310,11 +384,146 @@ def _render_card(entry):
         st.link_button("Apply (original listing)", url)
     else:
         st.caption("No application link was provided by this source.")
+    key = tracking.tracking_key(job)
+    if key is None:
+        st.caption("Cannot save: this listing has no stable link or ID.")
+    elif key in saved_keys:
+        if st.button("Saved ✓ — click to unsave", key=widget_key(key, "unsave", position)):
+            _toggle_saved(key, False)
+    elif st.button("Save job", key=widget_key(key, "save", position)):
+        _toggle_saved(key, True, job, match)
     with st.expander("Why this matches"):
         for reason in entry.get("reasons", []) or match.get("reasons", []):
             st.write(f"- {reason}")
         if "needs-review" in entry.get("flags", []):
             st.warning("Flagged for manual review (unclear location or role signal).")
+
+
+def render_saved_page(candidate):
+    """Saved snapshots + application tracking. Local data only, no network."""
+    st.header("Saved & Applications")
+    st.caption(
+        "Removing a saved job also removes its tracking record. "
+        "Cover-letter drafts are local templates from your actual profile — "
+        "never auto-sent anywhere."
+    )
+    saved, _, saved_warning = load_saved_jobs()
+    applications, _, apps_warning = load_applications()
+    for warning in (saved_warning, apps_warning):
+        if warning:
+            st.warning(warning)
+    if not saved:
+        st.info("No saved jobs yet — save jobs from Browse Jobs first.")
+        return
+    ordered = sorted(
+        saved.items(), key=lambda item: item[1].get("saved_at") or "", reverse=True
+    )
+    for position, (key, record) in enumerate(ordered):
+        job = record.get("job", {})
+        safe = widget_key(key, "saved", position)
+        title = job.get("title") or "Untitled role"
+        company = job.get("company")
+        current = applications.get(key, {})
+        status_label = current.get("status", "Saved")
+        with st.expander(f"{title} — {company or '?'} [{status_label}]"):
+            meta = " · ".join(
+                part
+                for part in (
+                    job.get("location"),
+                    job.get("work_mode"),
+                    f"via {job.get('source')}",
+                    f"saved {record.get('saved_at') or 'at an unknown time'}",
+                )
+                if part
+            )
+            if meta:
+                st.caption(meta)
+            url = job.get("apply_url") or job.get("source_url")
+            if url:
+                st.link_button("Apply (original listing)", url)
+            else:
+                st.caption("No application link was recorded for this job.")
+            status = st.selectbox(
+                "Status",
+                tracking.STATUSES,
+                index=tracking.STATUSES.index(status_label)
+                if status_label in tracking.STATUSES
+                else 0,
+                key=f"status-{safe}",
+            )
+            applied = st.text_input(
+                "Applied date (YYYY-MM-DD, empty to clear)",
+                value=current.get("applied_date") or "",
+                key=f"date-{safe}",
+            )
+            notes = st.text_area(
+                "Notes", value=current.get("notes") or "", key=f"notes-{safe}"
+            )
+            if st.button("Save updates", key=f"update-{safe}"):
+                try:
+                    saved_doc = {"version": 1, "jobs": saved}
+                    saved_doc, _ = tracking.ensure_snapshot(saved_doc, job)
+                    updated = tracking.set_status(
+                        {"version": 1, "applications": applications}, key, status
+                    )
+                    updated = tracking.set_applied_date(
+                        updated, key, applied.strip() or None
+                    )
+                    updated = tracking.set_notes(updated, key, notes)
+                    ok, errors = save_tracking_state(saved_doc, updated)
+                    if ok:
+                        st.success("Tracking updated.")
+                        st.rerun()
+                    else:
+                        st.error(
+                            "Partial failure — "
+                            + "; ".join(errors)
+                            + ". Nothing was reported as saved that was not "
+                            "persisted. Successfully written data is intact; "
+                            "please retry the failed part."
+                        )
+                except ValueError as exc:
+                    st.error(f"Updates not saved: {exc}")
+            with st.expander("Cover-letter draft"):
+                draft_key = f"letter-{safe}"
+                if draft_key not in st.session_state:
+                    st.session_state[draft_key] = current.get("cover_letter") or ""
+                if st.button("Generate draft from profile", key=f"gen-{safe}"):
+                    st.session_state[draft_key] = tracking.draft_cover_letter(
+                        job, candidate
+                    )
+                    st.rerun()
+                text = st.text_area("Edit draft", key=draft_key)
+                if st.button("Save draft", key=f"saveletter-{safe}"):
+                    try:
+                        updated = tracking.set_cover_letter(
+                            {"version": 1, "applications": applications}, key, text
+                        )
+                        ok, errors = save_tracking_state(
+                            {"version": 1, "jobs": saved}, updated
+                        )
+                        if ok:
+                            st.success("Draft saved.")
+                            st.rerun()
+                        else:
+                            st.error(
+                                "Draft not saved — "
+                                + "; ".join(errors)
+                                + ". Please retry."
+                            )
+                    except ValueError as exc:
+                        st.error(f"Draft not saved: {exc}")
+            if st.button("Remove saved job", key=f"remove-{safe}"):
+                updated_saved = tracking.remove_job({"version": 1, "jobs": saved}, key)
+                updated_apps = tracking.remove_application(
+                    {"version": 1, "applications": applications}, key
+                )
+                ok, errors = save_tracking_state(updated_saved, updated_apps)
+                if ok:
+                    st.success("Removed.")
+                    st.rerun()
+                else:
+                    st.error("Remove failed — " + "; ".join(errors) + ". Please retry.")
 
 
 def main():
@@ -331,6 +540,7 @@ def main():
 
     # ---------------------------------------------------------- sidebar
     with st.sidebar:
+        page = st.radio("Page", ["Browse Jobs", "Saved & Applications"])
         st.header("Experience preferences")
         pref_min = st.number_input(
             "Min required experience (yrs)",
@@ -482,6 +692,11 @@ def main():
         except storage.StorageError as exc:
             st.error(f"Preferences not saved: {exc}")
 
+    # ---------------------------------------------------------- saved page branch
+    if page == "Saved & Applications":
+        render_saved_page(candidate)
+        return
+
     # ---------------------------------------------------------- fetch
     st.header("2. Jobs")
     if fetch_clicked:
@@ -592,13 +807,15 @@ def main():
     eligible = [e for e in shown if "needs-review" not in e.get("flags", [])]
     review = [e for e in shown if "needs-review" in e.get("flags", [])]
     st.subheader(f"Eligible ({len(eligible)})")
-    for entry in eligible:
-        _render_card(entry)
+    saved_now, _, _ = load_saved_jobs()
+    saved_keys = set(saved_now)
+    for position, entry in enumerate(eligible):
+        _render_card(entry, saved_keys, position)
     if review:
         st.subheader(f"Needs review ({len(review)})")
         st.caption("Kept, but location or role signal was unclear — check manually.")
-        for entry in review:
-            _render_card(entry)
+        for offset, entry in enumerate(review):
+            _render_card(entry, saved_keys, len(eligible) + offset)
     if rejected:
         with st.expander(f"Excluded jobs ({len(rejected)}) with reasons"):
             for entry in rejected:
