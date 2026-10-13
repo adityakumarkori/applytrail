@@ -206,6 +206,39 @@ def test_adzuna_error_never_exposes_credentials(monkeypatch):
     assert "SECRET-KEY-2" not in str(excinfo.value)
 
 
+def test_adzuna_error_redacts_url_encoded_credentials(monkeypatch):
+    import urllib.parse
+
+    # Short app_id '1' also guards replacement order: redacting it first
+    # must not corrupt (and thereby preserve part of) the longer key.
+    raw_id, raw_key = "1", "s3cr+t/key=1"
+    monkeypatch.setenv("ADZUNA_APP_ID", raw_id)
+    monkeypatch.setenv("ADZUNA_APP_KEY", raw_key)
+    encoded_url = (
+        "https://api.adzuna.com/v1/api/jobs/in/search/1?app_id="
+        + urllib.parse.quote(raw_id, safe="")
+        + "&app_key="
+        + urllib.parse.quote(raw_key, safe="")
+    )
+    with patch(
+        "core.jobs.requests.get",
+        side_effect=requests.exceptions.HTTPError(f"403 for url: {encoded_url}"),
+    ):
+        with pytest.raises(SourceError) as excinfo:
+            fetch_adzuna("java")
+    message = str(excinfo.value)
+    for leaked in (
+        raw_id,
+        raw_key,
+        urllib.parse.quote(raw_id, safe=""),
+        urllib.parse.quote(raw_key, safe=""),
+        urllib.parse.quote_plus(raw_id),
+        urllib.parse.quote_plus(raw_key),
+    ):
+        assert leaked not in message, f"credential form leaked: {leaked!r}"
+    assert "403" in message  # useful diagnostics preserved
+
+
 def test_deduplicate_by_apply_url():
     first = normalize_arbeitnow_item(ARBEITNOW_PAYLOAD["data"][0])
     duplicate = dict(first, source="remoteok", id="remoteok:other")

@@ -25,6 +25,7 @@ unknown fields become None/"unknown", never invented values.
 
 import os
 import re
+import urllib.parse
 from datetime import datetime, timezone
 
 import requests
@@ -58,10 +59,28 @@ def _now_iso():
 
 
 def _sanitize(message, secrets):
+    """Redact secrets from error text, including URL-encoded forms.
+
+    Request libraries percent-encode query params, so an error string
+    may carry ``quote``/``quote_plus`` spellings of a key instead of the
+    raw value. All spellings are replaced, longest first, so a short
+    secret can never corrupt (and thereby preserve part of) a longer
+    encoded form. Pure stdlib, never raises.
+    """
     text = str(message)
+    variants = set()
     for secret in secrets:
-        if secret:
-            text = text.replace(secret, "***")
+        if not secret:
+            continue
+        variants.add(secret)
+        try:
+            variants.add(urllib.parse.quote(secret, safe=""))
+            variants.add(urllib.parse.quote_plus(secret))
+        except Exception:
+            pass
+    for variant in sorted(variants, key=len, reverse=True):
+        if variant:
+            text = text.replace(variant, "***")
     return text
 
 

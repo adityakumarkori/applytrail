@@ -5,7 +5,15 @@ operates on already-fetched data, so local filtering/sorting can never
 trigger a network request. Safe to unit-test without a browser.
 """
 
+from datetime import datetime, timezone
+
 SORT_OPTIONS = ("Match score", "Newest first", "Company A–Z")
+
+# Supported recency windows (days). None means no recency restriction.
+RECENCY_OPTIONS = (None, 7, 14, 30)
+
+# Skill-match modes for the local skill filter.
+SKILL_MATCH_MODES = ("any", "all")
 
 
 def attach_filter_info(ranked, filtered):
@@ -45,6 +53,49 @@ def _entry_text(entry, *fields):
     )
 
 
+def match_roles(job, target_roles):
+    """Check a job title against free-text target roles (pure).
+
+    Roles are normalized (trimmed, case-insensitive); an empty role
+    list means no restriction. A job matches when any role appears as
+    a substring of its title. Missing or non-string titles never match.
+    Role matching never overrides experience eligibility — it only
+    narrows already-filtered results.
+    """
+    roles = [
+        role.strip().lower()
+        for role in (target_roles or [])
+        if isinstance(role, str) and role.strip()
+    ]
+    if not roles:
+        return True
+    if not isinstance(job, dict):
+        return False
+    title = job.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return False
+    lowered = title.lower()
+    return any(role in lowered for role in roles)
+
+
+def posted_age_days(posted_date):
+    """Age of an ISO posting date in days, or None when unknown.
+
+    Missing, empty, or unparsable dates return None and are never
+    treated as recent. Naive timestamps are assumed UTC. Never raises
+    on bad input and never invents a date.
+    """
+    if not isinstance(posted_date, str) or not posted_date.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(posted_date.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - moment).total_seconds() / 86400.0
+
+
 def apply_local_filters(
     entries,
     role_keyword="",
@@ -52,18 +103,33 @@ def apply_local_filters(
     location="",
     work_modes=(),
     sources=(),
+    min_score=0,
+    posted_within_days=None,
+    skill_match="any",
+    target_roles=(),
 ):
     """Filter merged entries without refetching; returns a new list.
 
     Empty selections mean "all". Skill selection keeps jobs requiring
-    at least one selected skill. Matching is case-insensitive
-    substring (role/location) or membership (modes/sources).
+    at least one selected skill ("any") or every selected skill
+    ("all"); unknown modes fall back to "any". ``min_score`` is an
+    inclusive 0-100 threshold on the skill-overlap score.
+    ``posted_within_days`` keeps jobs posted at most that many days
+    ago; missing or invalid dates are never recent and are excluded
+    while the filter is active. ``target_roles`` narrows by job title
+    via :func:`match_roles`. Matching is case-insensitive substring
+    (role/location) or membership (modes/sources).
     """
     keyword = (role_keyword or "").strip().lower()
     wanted_skills = {s for s in (skills or []) if isinstance(s, str)}
     wanted_location = (location or "").strip().lower()
     wanted_modes = {m for m in (work_modes or []) if isinstance(m, str)}
     wanted_sources = {s for s in (sources or []) if isinstance(s, str)}
+    try:
+        threshold = float(min_score)
+    except (TypeError, ValueError):
+        threshold = 0.0
+    match_all = skill_match == "all"
 
     kept = []
     for entry in entries or []:
@@ -75,10 +141,13 @@ def apply_local_filters(
             entry, "title", "company", "description"
         ).lower():
             continue
-        if wanted_skills and not (
-            wanted_skills & set(match.get("job_skills", []))
-        ):
-            continue
+        job_skills = set(match.get("job_skills", []))
+        if wanted_skills:
+            if match_all:
+                if not wanted_skills <= job_skills:
+                    continue
+            elif not (wanted_skills & job_skills):
+                continue
         if wanted_location and wanted_location not in str(
             job.get("location") or ""
         ).lower():
@@ -86,6 +155,18 @@ def apply_local_filters(
         if wanted_modes and job.get("work_mode") not in wanted_modes:
             continue
         if wanted_sources and job.get("source") not in wanted_sources:
+            continue
+        try:
+            score = float(match.get("score", 0))
+        except (TypeError, ValueError):
+            score = 0.0
+        if score < threshold:
+            continue
+        if posted_within_days is not None:
+            age = posted_age_days(job.get("posted_date"))
+            if age is None or age > posted_within_days:
+                continue
+        if not match_roles(job, target_roles):
             continue
         kept.append(entry)
     return kept
