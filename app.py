@@ -294,6 +294,60 @@ def widget_key(key, prefix, position):
 
 
 # ---------------------------------------------------------------- pure pipeline
+def describe_fetch_outcome(fetched):
+    """Compose honest fetch messages from a fetch_all_jobs result (pure).
+
+    Distinguishes sources that ran (with per-source counts, so zero
+    results are reported, not guessed), sources that failed, and an
+    unconfigured Adzuna key. Never describes a failed source as
+    successful. No network, no I/O.
+    """
+    fetched = fetched if isinstance(fetched, dict) else {}
+    jobs = fetched.get("jobs") or []
+    attempted = [
+        source
+        for source in fetched.get("sources_attempted", [])
+        if isinstance(source, str)
+    ]
+    failed = [
+        entry.get("source")
+        for entry in fetched.get("errors", [])
+        if isinstance(entry, dict) and entry.get("source")
+    ]
+    counts = fetched.get("source_counts")
+    counts = counts if isinstance(counts, dict) else {}
+    adzuna_configured = fetched.get("adzuna_configured", True)
+    ran = [
+        source
+        for source in attempted
+        if source not in failed
+        and (source != "adzuna" or adzuna_configured)
+    ]
+    zero_sources = [
+        source
+        for source in ran
+        if source in counts and counts.get(source) == 0
+    ]
+    listed_total = sum(
+        count for count in counts.values() if isinstance(count, (int, float))
+    )
+    if ran:
+        success = f"Fetched {len(jobs)} jobs from {', '.join(ran)}."
+        if listed_total > len(jobs):
+            success += " Duplicates across sources were removed."
+    else:
+        success = "No jobs fetched — see the source messages above."
+    return {
+        "success": success,
+        "zero_sources": zero_sources,
+        "sources_ok": ran,
+        "sources_failed": failed,
+        "adzuna_skipped": "adzuna" in attempted
+        and not adzuna_configured
+        and "adzuna" not in failed,
+    }
+
+
 def build_results(raw_jobs, candidate, pref_min, pref_max):
     """Filter + rank + attach reasons/flags. Pure: no network, no I/O."""
     filtered = job_filters.filter_jobs(raw_jobs, candidate, pref_min, pref_max)
@@ -734,6 +788,11 @@ def main():
 
     # ---------------------------------------------------------- fetch
     st.header("2. Jobs")
+    st.caption(
+        "Shared free sources — please Fetch sparingly (Remotive asks for "
+        "only a few refreshes per day). Every result links back to its "
+        "original provider listing."
+    )
     if fetch_clicked:
         try:
             with st.spinner("Fetching from free job sources…"):
@@ -766,10 +825,15 @@ def main():
                     "Fetched jobs shown, but local cache failed: "
                     + "; ".join(cache_errors)
                 )
-            st.success(
-                f"Fetched {len(fetched['jobs'])} jobs "
-                f"({', '.join(fetched['sources_attempted'])})."
-            )
+            outcome = describe_fetch_outcome(fetched)
+            st.success(outcome["success"])
+            for source in outcome["zero_sources"]:
+                st.info(f"{source} returned no jobs for this query.")
+            if outcome["adzuna_skipped"]:
+                st.info(
+                    "Adzuna skipped (no key) — add a free Adzuna key for "
+                    "India listings."
+                )
         except Exception as exc:  # last-resort guard; adapters raise SourceError
             st.error(f"Job fetch failed: {exc}")
 

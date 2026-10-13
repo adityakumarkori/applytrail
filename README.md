@@ -29,7 +29,8 @@ Then open http://localhost:8501 and:
 3. Click **Fetch / refresh jobs** (the only network action).
 4. Filter/sort the fetched results locally and open Apply links.
 
-Fetched jobs are cached to `data/` (git-ignored). Adzuna keys can be
+Fetched jobs are cached to `data/` (git-ignored). Fetch sparingly —
+shared free sources rate-limit aggressive refreshers. Adzuna keys can be
 entered in the sidebar or via `ADZUNA_APP_ID` / `ADZUNA_APP_KEY`
 environment variables; they are never stored or displayed.
 

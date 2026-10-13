@@ -292,3 +292,78 @@ def test_jobs_module_imports_stay_minimal():
     assert "requests" in blob
     for banned in ("streamlit", "sklearn", "scikit", "pypdf", "fastapi"):
         assert banned not in blob, f"core/jobs.py must not import {banned}"
+
+
+def test_http_429_is_classified_as_rate_limited():
+    with patch("core.jobs.requests.get", return_value=_response({}, status=429)):
+        with pytest.raises(SourceError) as excinfo:
+            fetch_remoteok("java")
+    assert "rate limited" in str(excinfo.value)
+    assert "remoteok" in str(excinfo.value)
+
+
+def test_http_500_stays_generic_source_error():
+    with patch("core.jobs.requests.get", return_value=_response({}, status=500)):
+        with pytest.raises(SourceError) as excinfo:
+            fetch_remoteok("java")
+    assert "rate limited" not in str(excinfo.value)
+
+
+def _stub_jobs(*job_dicts):
+    return [dict(job) for job in job_dicts]
+
+
+def _stub_job(source, job_id, url):
+    return {
+        "id": f"{source}:{job_id}",
+        "title": "Java Developer",
+        "company": "Acme",
+        "location": "Remote",
+        "work_mode": "remote",
+        "description": "Java role",
+        "source": source,
+        "source_url": url,
+        "apply_url": url,
+        "posted_date": None,
+        "fetched_at": "t",
+    }
+
+
+def test_fetch_all_reports_per_source_counts(monkeypatch):
+    monkeypatch.setenv("ADZUNA_APP_ID", "id")
+    monkeypatch.setenv("ADZUNA_APP_KEY", "key")
+    with (
+        patch("core.jobs.fetch_arbeitnow", return_value=_stub_jobs(_stub_job("arbeitnow", "1", "https://a.example/1"))),
+        patch("core.jobs.fetch_remoteok", return_value=[]),
+        patch("core.jobs.fetch_remotive", return_value=_stub_jobs(_stub_job("remotive", "2", "https://r.example/2"))),
+        patch("core.jobs.fetch_adzuna", return_value=[]),
+    ):
+        result = fetch_all_jobs("java")
+    assert result["source_counts"] == {
+        "arbeitnow": 1,
+        "remoteok": 0,
+        "remotive": 1,
+        "adzuna": 0,
+    }
+    assert result["adzuna_configured"] is True
+    assert result["errors"] == []
+
+
+def test_fetch_all_partial_counts_and_unconfigured_adzuna(monkeypatch):
+    monkeypatch.delenv("ADZUNA_APP_ID", raising=False)
+    monkeypatch.delenv("ADZUNA_APP_KEY", raising=False)
+
+    def boom(query="", limit=20, timeout=None):
+        raise SourceError("arbeitnow down (simulated)")
+
+    with (
+        patch("core.jobs.fetch_arbeitnow", side_effect=boom),
+        patch("core.jobs.fetch_remoteok", return_value=_stub_jobs(_stub_job("remoteok", "3", "https://o.example/3"))),
+        patch("core.jobs.fetch_remotive", return_value=[]),
+        patch("core.jobs.fetch_adzuna", return_value=[]),
+    ):
+        result = fetch_all_jobs("java")
+    assert result["source_counts"] == {"remoteok": 1, "remotive": 0, "adzuna": 0}
+    assert "arbeitnow" not in result["source_counts"]
+    assert result["adzuna_configured"] is False
+    assert [entry["source"] for entry in result["errors"]] == ["arbeitnow"]
