@@ -39,6 +39,16 @@ any result card, track status (Saved / Applied / Interview / Rejected /
 Offer) with dates and notes, and keep editable cover-letter drafts —
 all in local `data/saved_jobs.json` and `data/applications.json`.
 
+### Recency filter
+
+The “Posted within” filter offers Any time, 7, 14, or 30 days. A job is
+kept when its posting-date age in days is at most the selected window
+(boundary inclusive); naive timestamps are assumed UTC. Jobs with
+missing, empty, or unparsable posting dates are never treated as
+recent: with Any time they are shown normally (sorted last), while an
+active 7/14/30-day filter excludes them — the UI says so whenever the
+filter is on. No posting dates are invented.
+
 ## Tests
 
 ```powershell

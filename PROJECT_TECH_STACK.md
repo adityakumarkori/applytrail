@@ -36,12 +36,14 @@
   - RemoteOK API – free, no key – `https://remoteok.com/api`
   - Remotive API – free, no key
   - Adzuna API – free 1000 calls/month, needs free key – required for India jobs
-- **Matching:** scikit-learn (TF-IDF / keyword overlap)
+- **Matching:** Python standard library only (skill-overlap scoring).
+  scikit-learn was considered early on but never adopted — it is not
+  installed and not required.
 - **Storage:** local JSON – `data/profile.json`, `data/jobs.json` – no DB
 - **Run:** no Docker, no hosting
 
 ```
-pip install streamlit requests pypdf scikit-learn
+pip install streamlit requests pypdf
 streamlit run app.py
 ```
 - Frontend: http://localhost:8501
