@@ -15,6 +15,7 @@ Experience policy (conservative):
 - No match -> years=None, confidence `unknown`, plus a warning.
 """
 
+import io
 import re
 from pathlib import Path
 
@@ -93,6 +94,62 @@ def _extract_experience(text):
     return None, "unknown", None, None
 
 
+def _text_from_reader(reader, name):
+    """Extract text from an open PdfReader; shared by path/bytes entry points."""
+    if getattr(reader, "is_encrypted", False):
+        try:
+            ok = reader.decrypt("")
+        except Exception as exc:
+            raise EncryptedResumeError(
+                f"Encrypted PDF {name} cannot be decrypted: {exc}"
+            ) from exc
+        if not ok:
+            raise EncryptedResumeError(
+                f"Encrypted PDF {name} requires a password; "
+                "not decrypted with an empty password."
+            )
+
+    try:
+        pages = reader.pages
+    except Exception as exc:
+        raise ResumeParseError(f"Cannot read pages of {name}: {exc}") from exc
+
+    chunks = []
+    for page in pages:
+        try:
+            chunk = page.extract_text() or ""
+        except Exception as exc:
+            raise ResumeParseError(
+                f"Text extraction failed for {name}: {exc}"
+            ) from exc
+        chunks.append(chunk)
+    text = "\n".join(chunks)
+
+    warnings = []
+    if not text.strip():
+        warnings.append(
+            "No extractable text found — PDF may be scanned/image-only, "
+            "empty, or text extraction failed; manual review needed."
+        )
+    elif len(text.strip()) < SHORT_TEXT_CHARS:
+        warnings.append(
+            f"Very little extractable text ({len(text.strip())} chars); "
+            "results may be incomplete."
+        )
+    return text, warnings
+
+
+def _parse_with_warnings(text, source, extract_warnings):
+    """Build the resume dict, merging extraction warnings first."""
+    result = parse_text(text, source=source)
+    merged = list(extract_warnings)
+    for warning in result["warnings"]:
+        if warning not in merged:
+            merged.append(warning)
+    result["warnings"] = merged
+    return result
+
+
 def extract_text_from_pdf(path):
     """Extract text from a PDF, returning (text, warnings).
 
@@ -110,48 +167,22 @@ def extract_text_from_pdf(path):
         raise
     except Exception as exc:
         raise ResumeParseError(f"Cannot read PDF {pdf_path.name}: {exc}") from exc
+    return _text_from_reader(reader, pdf_path.name)
 
-    if getattr(reader, "is_encrypted", False):
-        try:
-            ok = reader.decrypt("")
-        except Exception as exc:
-            raise EncryptedResumeError(
-                f"Encrypted PDF {pdf_path.name} cannot be decrypted: {exc}"
-            ) from exc
-        if not ok:
-            raise EncryptedResumeError(
-                f"Encrypted PDF {pdf_path.name} requires a password; "
-                "not decrypted with an empty password."
-            )
 
+def parse_pdf_bytes(data, source="upload.pdf"):
+    """Parse an in-memory PDF upload without touching disk.
+
+    Same output contract and errors as :func:`parse_resume`.
+    """
+    if not isinstance(data, (bytes, bytearray)) or not bytes(data):
+        raise ResumeParseError("Empty upload — no PDF bytes received.")
     try:
-        pages = reader.pages
+        reader = PdfReader(io.BytesIO(bytes(data)))
     except Exception as exc:
-        raise ResumeParseError(f"Cannot read pages of {pdf_path.name}: {exc}") from exc
-
-    chunks = []
-    for page in pages:
-        try:
-            chunk = page.extract_text() or ""
-        except Exception as exc:
-            raise ResumeParseError(
-                f"Text extraction failed for {pdf_path.name}: {exc}"
-            ) from exc
-        chunks.append(chunk)
-    text = "\n".join(chunks)
-
-    warnings = []
-    if not text.strip():
-        warnings.append(
-            "No extractable text found — PDF may be scanned/image-only, "
-            "empty, or text extraction failed; manual review needed."
-        )
-    elif len(text.strip()) < SHORT_TEXT_CHARS:
-        warnings.append(
-            f"Very little extractable text ({len(text.strip())} chars); "
-            "results may be incomplete."
-        )
-    return text, warnings
+        raise ResumeParseError(f"Cannot read PDF {source}: {exc}") from exc
+    text, extract_warnings = _text_from_reader(reader, source)
+    return _parse_with_warnings(text, source, extract_warnings)
 
 
 def parse_text(text, source=""):
@@ -201,11 +232,4 @@ def parse_text(text, source=""):
 def parse_resume(path):
     """Extract a PDF and return the structured resume dict."""
     text, extract_warnings = extract_text_from_pdf(path)
-    result = parse_text(text, source=Path(path).name)
-    # Extraction warnings first, without duplicating identical messages.
-    merged = list(extract_warnings)
-    for warning in result["warnings"]:
-        if warning not in merged:
-            merged.append(warning)
-    result["warnings"] = merged
-    return result
+    return _parse_with_warnings(text, Path(path).name, extract_warnings)

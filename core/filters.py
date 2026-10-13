@@ -143,12 +143,33 @@ def parse_job_experience(job):
     }
 
 
-def is_eligible(job, candidate_years):
-    """Apply the strict experience policy; returns (ok, reasons)."""
+def _pref_band(pref_min, pref_max):
+    """Resolve configurable experience preferences (years).
+
+    Defaults preserve the locked strict policy: lo=EXP_MIN_YEARS,
+    hi=EXP_MAX_STRICT_YEARS, and the conditional band one year above
+    hi (mirroring the 0-2 strict / 0-3 conditional rule for any
+    target, e.g. 3-4 strict / up to 5 conditional).
+    """
+    lo = config.EXP_MIN_YEARS if pref_min is None else pref_min
+    hi = config.EXP_MAX_STRICT_YEARS if pref_max is None else pref_max
+    if lo > hi:
+        raise ValueError(f"pref_min ({lo:g}) must not exceed pref_max ({hi:g})")
+    band = hi + (config.EXP_MAX_CONDITIONAL_YEARS - config.EXP_MAX_STRICT_YEARS)
+    return lo, hi, band
+
+
+def is_eligible(job, candidate_years, pref_min=None, pref_max=None):
+    """Apply the strict experience policy; returns (ok, reasons).
+
+    ``pref_min``/``pref_max`` optionally override the acceptable
+    required-experience window (defaults 0-2 from config). Omitted
+    arguments behave exactly as before; no existing call changes meaning.
+    """
     req = parse_job_experience(job)
     evidence = f" (evidence: {req['evidence']!r})" if req["evidence"] else ""
-    strict_max = config.EXP_MAX_STRICT_YEARS
-    band_max = config.EXP_MAX_CONDITIONAL_YEARS
+    lo, hi, band_max = _pref_band(pref_min, pref_max)
+    explicit_low = req["min_years"] is not None and req["min_years"] <= lo + 1
 
     if req["min_years"] is None:
         return False, [
@@ -160,27 +181,27 @@ def is_eligible(job, candidate_years):
             f"({req['conflict_evidence']!r}) contradicts stated minimum "
             f"({req['evidence']!r}) — excluded conservatively"
         ]
-    if req["min_years"] > strict_max:
+    if req["min_years"] > hi:
         return False, [
             f"requires minimum {req['min_years']:g} years "
-            f"(above {strict_max}-year strict cap)" + evidence
+            f"(above {hi:g}-year strict cap)" + evidence
         ]
     if req["max_years"] is not None and req["max_years"] > band_max:
         return False, [
             f"requires up to {req['max_years']:g} years "
-            f"(above {band_max}-year band)" + evidence
+            f"(above {band_max:g}-year band)" + evidence
         ]
     if (
         req["max_years"] is not None
-        and req["max_years"] > strict_max
-        and not req["explicit_0_2"]
+        and req["max_years"] > hi
+        and not explicit_low
     ):
         return False, [
             f"up to {req['max_years']:g} years with no explicit "
-            "0–2-year eligibility" + evidence
+            f"{lo:g}–{hi:g}-year eligibility" + evidence
         ]
     if candidate_years is None:
-        if req["min_years"] == 0 or req["kind"] == "fresher":
+        if lo == 0 and req["min_years"] <= lo:
             return True, [
                 "candidate experience unknown but role explicitly "
                 "welcomes zero-year candidates" + evidence
@@ -280,8 +301,13 @@ def _location_unclear(job):
     )
 
 
-def filter_jobs(jobs, candidate):
+def filter_jobs(jobs, candidate, pref_min=None, pref_max=None):
     """Split jobs into kept/rejected with reasons; inputs never mutated.
+
+    ``pref_min``/``pref_max`` optionally override the acceptable
+    required-experience window (defaults 0-2 from config) and are
+    passed through to :func:`is_eligible`. Omitted arguments behave
+    exactly as before.
 
     The ``needs-review`` flag is derived from structured decision data
     (skill overlap and location classification), not by matching the
@@ -295,7 +321,9 @@ def filter_jobs(jobs, candidate):
     for job in jobs or []:
         if not isinstance(job, dict):
             continue
-        ok_exp, exp_reasons = is_eligible(job, candidate.get("experience_years"))
+        ok_exp, exp_reasons = is_eligible(
+            job, candidate.get("experience_years"), pref_min, pref_max
+        )
         ok_role, role_reasons = is_role_relevant(job, candidate)
         ok_loc, loc_reasons = is_location_relevant(job)
         reasons = exp_reasons + role_reasons + loc_reasons
