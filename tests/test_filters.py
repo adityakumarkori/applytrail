@@ -138,3 +138,70 @@ def test_filters_module_imports_stay_minimal():
     blob = "\n".join(import_lines)
     for banned in ("streamlit", "sklearn", "scikit", "requests", "pypdf", "fastapi"):
         assert banned not in blob, f"core/filters.py must not import {banned}"
+
+
+def test_bare_entry_level_does_not_override_explicit_minimum():
+    parsed = parse_job_experience(_job("T", "Entry level, 2-3 years of experience"))
+    assert parsed["explicit_0_2"] is False
+    assert parsed["conflict"] is False
+    ok, _ = is_eligible(_job("T", "Entry level, 2-3 years of experience"), 2.5)
+    assert ok is False
+
+
+def test_0_to_3_accepted_with_explicit_nonconflicting_evidence():
+    job = _job("T", "Freshers welcome! 0-3 years of experience")
+    parsed = parse_job_experience(job)
+    assert parsed["explicit_0_2"] is True
+    assert parsed["conflict"] is False
+    assert is_eligible(job, 1.0)[0] is True
+
+
+def test_conflicting_fresher_wording_and_minimum_rejected():
+    job = _job("T", "Freshers welcome! 3+ years of experience required")
+    parsed = parse_job_experience(job)
+    assert parsed["conflict"] is True
+    ok, reasons = is_eligible(job, 1.5)
+    assert ok is False
+    assert any("conflicting" in r for r in reasons)
+    assert any("Freshers welcome" in r and "3+ years" in r for r in reasons)
+
+
+def test_conflicting_fresher_wording_with_range_rejected():
+    ok, reasons = is_eligible(_job("T", "Freshers welcome, 2-3 years"), 2.5)
+    assert ok is False
+    assert any("conflicting" in r for r in reasons)
+
+
+def test_invalid_inputs_rejected_without_exceptions():
+    candidate = _candidate()
+    for bad in (None, "onsite berlin", 42, ["not", "a", "dict"]):
+        ok, reasons = is_role_relevant(bad, candidate)
+        assert ok is False
+        assert reasons
+        ok, reasons = is_location_relevant(bad)
+        assert ok is False
+        assert reasons
+    result = filter_jobs([None, "junk", 42], candidate)
+    assert result == {"kept": [], "rejected": []}
+
+
+def test_review_flags_come_from_structured_conditions():
+    clear = _job(
+        "Java Backend Developer",
+        "0-2 years, Spring Boot and Java",
+        location="Remote",
+        work_mode="remote",
+    )
+    unclear_loc = _job(
+        "Java Backend Developer",
+        "0-2 years, Spring Boot and Java",
+        location="",
+        work_mode="unknown",
+    )
+    result = filter_jobs([clear, unclear_loc], _candidate())
+    assert result["kept"][0]["flags"] == []
+    assert result["kept"][1]["flags"] == ["needs-review"]
+    # No shared skills is itself a review condition, independent of wording.
+    no_overlap = _job("Cobol Developer", "0-2 years, Cobol role")
+    flagged = filter_jobs([no_overlap], _candidate())["kept"][0]["flags"]
+    assert flagged == ["needs-review"]
