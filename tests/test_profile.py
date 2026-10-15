@@ -26,6 +26,13 @@ def test_valid_profile_preserved_without_warnings():
         "target_roles": [],
         "min_score": 0,
         "posted_within": None,
+        "full_name": "",
+        "email": "",
+        "phone": "",
+        "location": "",
+        "linkedin_url": "",
+        "portfolio_url": "",
+        "headline_summary": "",
     }
 
 
@@ -122,6 +129,13 @@ def test_empty_profile_produces_zero_warnings_with_defaults():
         "target_roles": [],
         "min_score": 0,
         "posted_within": None,
+        "full_name": "",
+        "email": "",
+        "phone": "",
+        "location": "",
+        "linkedin_url": "",
+        "portfolio_url": "",
+        "headline_summary": "",
     }
 
 

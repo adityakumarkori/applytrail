@@ -61,6 +61,95 @@ def _coerce_pref(value, default):
     return number, True
 
 
+_CONTACT_LIMITS = {
+    "full_name": 100,
+    "email": 254,
+    "phone": 30,
+    "location": 200,
+    "linkedin_url": 500,
+    "portfolio_url": 500,
+    "headline_summary": 500,
+}
+_CONTACT_FIELDS = tuple(_CONTACT_LIMITS)
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_ALLOWED_RE = re.compile(r"^[+\d][\d\s\-().]*$")
+
+
+def _clean_text_field(value, max_len):
+    """Trim + truncate a free-text contact field; non-strings become ""."""
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:max_len]
+
+
+def _clean_email(value):
+    """Return a valid email or "" (never raises, never invents)."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    if len(text) > _CONTACT_LIMITS["email"] or not _EMAIL_RE.match(text):
+        return ""
+    return text
+
+
+def _clean_phone(value):
+    """Return a plausible phone string or "" (7–15 digits, common symbols)."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    if len(text) > _CONTACT_LIMITS["phone"]:
+        return ""
+    if not _PHONE_ALLOWED_RE.match(text):
+        return ""
+    digits = re.sub(r"\D", "", text)
+    if not 7 <= len(digits) <= 15:
+        return ""
+    return text
+
+
+def _clean_contact_url(value, max_len):
+    """Return a validated http(s) URL or "".
+
+    Accepts bare hosts like ``linkedin.com/in/x`` by prepending
+    ``https://`` before validation. Never fetches.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = "https://" + text
+    if len(text) > max_len or re.search(r"\s", text):
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:
+        return ""
+    if parts.scheme.lower() not in ("http", "https"):
+        return ""
+    host = (parts.hostname or "").lower()
+    if not host or "." not in host:
+        return ""
+    return text
+
+
+def _sanitize_contact_field(key, value):
+    """Clean one contact field by key; "" when missing/invalid (never raises)."""
+    limit = _CONTACT_LIMITS[key]
+    if key == "email":
+        return _clean_email(value)
+    if key == "phone":
+        return _clean_phone(value)
+    if key in ("linkedin_url", "portfolio_url"):
+        return _clean_contact_url(value, limit)
+    return _clean_text_field(value, limit)
+
+
 def sanitize_profile(profile):
     """Validate a loaded profile without raising on malformed input.
 
@@ -80,6 +169,13 @@ def sanitize_profile(profile):
         "target_roles": [],
         "min_score": _MIN_SCORE_DEFAULT,
         "posted_within": None,
+        "full_name": "",
+        "email": "",
+        "phone": "",
+        "location": "",
+        "linkedin_url": "",
+        "portfolio_url": "",
+        "headline_summary": "",
     }
     if not isinstance(profile, dict):
         return clean, ["Saved profile was unreadable — restored safe defaults."]
@@ -154,6 +250,17 @@ def sanitize_profile(profile):
         clean["posted_within"] = recency
     elif "posted_within" in profile:
         warnings.append("Saved recency preference was invalid — restored to Any time.")
+    for key in _CONTACT_FIELDS:
+        if key not in profile:
+            continue
+        raw = profile[key]
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        cleaned = _sanitize_contact_field(key, raw)
+        if cleaned:
+            clean[key] = cleaned
+        elif key in ("email", "phone", "linkedin_url", "portfolio_url"):
+            warnings.append(f"Saved contact {key.replace('_', ' ')} was invalid — cleared.")
     return clean, warnings
 
 
@@ -173,11 +280,20 @@ def build_profile_payload(
     target_roles,
     min_score,
     posted_within,
+    full_name="",
+    email="",
+    phone="",
+    location="",
+    linkedin_url="",
+    portfolio_url="",
+    headline_summary="",
 ):
     """Validate a full preferences payload; raises ValueError on invalid.
 
     Pure: performs no I/O. Accepted values mirror the sidebar widgets,
     so a payload built from them validates unless the range is inverted.
+    Contact fields are optional; invalid email/phone/URLs raise
+    ValueError, free-text fields are trimmed + truncated to caps.
     """
     problems = []
     lo, lo_ok = _coerce_pref(pref_min, _PREF_MIN_DEFAULT)
@@ -218,6 +334,22 @@ def build_profile_payload(
         clean_within = None
     else:
         clean_within = posted_within
+    contacts = {
+        "full_name": _clean_text_field(full_name, _CONTACT_LIMITS["full_name"]),
+        "email": _clean_email(email),
+        "phone": _clean_phone(phone),
+        "location": _clean_text_field(location, _CONTACT_LIMITS["location"]),
+        "linkedin_url": _clean_contact_url(linkedin_url, _CONTACT_LIMITS["linkedin_url"]),
+        "portfolio_url": _clean_contact_url(portfolio_url, _CONTACT_LIMITS["portfolio_url"]),
+        "headline_summary": _clean_text_field(
+            headline_summary, _CONTACT_LIMITS["headline_summary"]
+        ),
+    }
+    for key in ("email", "phone", "linkedin_url", "portfolio_url"):
+        provided = {"email": email, "phone": phone, "linkedin_url": linkedin_url,
+                    "portfolio_url": portfolio_url}[key]
+        if isinstance(provided, str) and provided.strip() and not contacts[key]:
+            problems.append(f"contact {key.replace('_', ' ')} is invalid")
     if problems:
         raise ValueError("; ".join(problems))
     return {
@@ -231,6 +363,7 @@ def build_profile_payload(
         "target_roles": clean_roles,
         "min_score": clean_score,
         "posted_within": clean_within,
+        **contacts,
     }
 
 
@@ -341,6 +474,62 @@ def resolve_apply_links(job):
 def _source_label(job):
     source = job.get("source") if isinstance(job, dict) else None
     return f"via {source}" if isinstance(source, str) and source.strip() else "via provider"
+
+
+KIT_FIELD_LABELS = (
+    ("full_name", "Full name"),
+    ("email", "Email"),
+    ("phone", "Phone"),
+    ("location", "Location"),
+    ("linkedin_url", "LinkedIn"),
+    ("portfolio_url", "Portfolio"),
+    ("headline_summary", "Headline"),
+)
+
+
+def build_application_kit(candidate, profile):
+    """Build copy-paste fields from candidate + saved profile (pure).
+
+    Returns a list of (label, value) tuples with non-empty values only,
+    ordered for form filling: contact first, then links, headline,
+    skills, experience. Missing/legacy values are skipped, never
+    invented. Never raises on malformed input.
+    """
+    candidate = candidate if isinstance(candidate, dict) else {}
+    profile = profile if isinstance(profile, dict) else {}
+    fields = []
+    for key, label in KIT_FIELD_LABELS:
+        value = profile.get(key)
+        if isinstance(value, str) and value.strip():
+            fields.append((label, value.strip()))
+    raw_skills = candidate.get("skills")
+    if not (isinstance(raw_skills, list) and raw_skills):
+        raw_skills = profile.get("skills")
+    skills = [s.strip() for s in (raw_skills or []) if isinstance(s, str) and s.strip()]
+    if skills:
+        fields.append(("Skills", ", ".join(skills)))
+    years = candidate.get("experience_years")
+    if years is None:
+        years = profile.get("experience_years")
+    if (
+        isinstance(years, (int, float))
+        and not isinstance(years, bool)
+        and math.isfinite(float(years))
+        and 0.0 <= float(years) <= 30.0
+    ):
+        fields.append(("Experience", f"{float(years):g} years"))
+    return fields
+
+
+def render_application_kit(fields, key_prefix, position):
+    """Render one-click copy fields with empty-state guidance."""
+    if not fields:
+        st.caption("Fill your application profile in the sidebar, then copy values here.")
+        return
+    for index, (label, value) in enumerate(fields):
+        st.caption(label)
+        st.code(value, language=None)
+
 
 
 # ---------------------------------------------------------------- pure pipeline
@@ -497,7 +686,7 @@ def _toggle_saved(key, should_save, job=None, match=None):
     st.rerun()
 
 
-def _render_card(entry, saved_keys=frozenset(), position=0):
+def _render_card(entry, saved_keys=frozenset(), position=0, candidate=None, profile=None):
     job, match = entry["job"], entry["match"]
     title = job.get("title") or "Untitled role"
     company = job.get("company")
@@ -540,6 +729,13 @@ def _render_card(entry, saved_keys=frozenset(), position=0):
             _toggle_saved(key, False)
     elif st.button("Save job", key=widget_key(key, "save", position)):
         _toggle_saved(key, True, job, match)
+    with st.expander("Application kit (copy into the employer's form)"):
+        st.caption("Local copy-paste only — nothing is auto-submitted anywhere.")
+        render_application_kit(
+            build_application_kit(candidate, profile),
+            "kit",
+            position,
+        )
     with st.expander("Why this matches"):
         for reason in entry.get("reasons", []) or match.get("reasons", []):
             st.write(f"- {reason}")
@@ -547,7 +743,7 @@ def _render_card(entry, saved_keys=frozenset(), position=0):
             st.warning("Flagged for manual review (unclear location or role signal).")
 
 
-def render_saved_page(candidate):
+def render_saved_page(candidate, profile=None):
     """Saved snapshots + application tracking. Local data only, no network."""
     st.header("Saved & Applications")
     st.caption(
@@ -596,6 +792,13 @@ def render_saved_page(candidate):
                 st.caption("No direct company application link identified — apply on the original listing page.")
             else:
                 st.caption("No application link was recorded for this job.")
+            with st.expander("Application kit (copy into the employer's form)"):
+                st.caption("Local copy-paste only — nothing is auto-submitted anywhere.")
+                render_application_kit(
+                    build_application_kit(candidate, profile),
+                    f"saved-kit-{safe}",
+                    position,
+                )
             status = st.selectbox(
                 "Status",
                 tracking.STATUSES,
@@ -643,7 +846,7 @@ def render_saved_page(candidate):
                     st.session_state[draft_key] = current.get("cover_letter") or ""
                 if st.button("Generate draft from profile", key=f"gen-{safe}"):
                     st.session_state[draft_key] = tracking.draft_cover_letter(
-                        job, candidate
+                        job, candidate, profile
                     )
                     st.rerun()
                 text = st.text_area("Edit draft", key=draft_key)
@@ -736,6 +939,18 @@ def main():
                 )
             ),
         )
+        st.header("Profile for applications")
+        st.caption(
+            "Stored locally only. Copy from each job's Application kit — "
+            "nothing is ever auto-submitted."
+        )
+        full_name = st.text_input("Full name", value=profile["full_name"])
+        email = st.text_input("Email", value=profile["email"])
+        phone = st.text_input("Phone", value=profile["phone"])
+        contact_location = st.text_input("Location (city, country)", value=profile["location"])
+        linkedin_url = st.text_input("LinkedIn URL", value=profile["linkedin_url"])
+        portfolio_url = st.text_input("Portfolio / GitHub URL", value=profile["portfolio_url"])
+        headline_summary = st.text_area("Headline summary", value=profile["headline_summary"])
         save_clicked = st.button("Save preferences")
         with st.expander("Adzuna key (optional)"):
             st.caption(
@@ -837,6 +1052,13 @@ def main():
                 parse_target_roles(roles_text),
                 min_score,
                 _POSTED_WITHIN_DAYS[recency_label],
+                full_name,
+                email,
+                phone,
+                contact_location,
+                linkedin_url,
+                portfolio_url,
+                headline_summary,
             )
             save_preferences(payload)
             st.success("Preferences saved locally (no jobs fetched).")
@@ -845,7 +1067,7 @@ def main():
 
     # ---------------------------------------------------------- saved page branch
     if page == "Saved & Applications":
-        render_saved_page(candidate)
+        render_saved_page(candidate, profile)
         return
 
     # ---------------------------------------------------------- fetch
@@ -880,6 +1102,13 @@ def main():
                     "target_roles": parse_target_roles(roles_text),
                     "min_score": min_score,
                     "posted_within": _POSTED_WITHIN_DAYS[recency_label],
+                    "full_name": full_name.strip() if isinstance(full_name, str) else "",
+                    "email": email.strip() if isinstance(email, str) else "",
+                    "phone": phone.strip() if isinstance(phone, str) else "",
+                    "location": contact_location.strip() if isinstance(contact_location, str) else "",
+                    "linkedin_url": linkedin_url.strip() if isinstance(linkedin_url, str) else "",
+                    "portfolio_url": portfolio_url.strip() if isinstance(portfolio_url, str) else "",
+                    "headline_summary": headline_summary.strip() if isinstance(headline_summary, str) else "",
                 },
             )
             if cache_errors:
@@ -967,12 +1196,12 @@ def main():
     saved_now, _, _ = load_saved_jobs()
     saved_keys = set(saved_now)
     for position, entry in enumerate(eligible):
-        _render_card(entry, saved_keys, position)
+        _render_card(entry, saved_keys, position, candidate, profile)
     if review:
         st.subheader(f"Needs review ({len(review)})")
         st.caption("Kept, but location or role signal was unclear — check manually.")
         for offset, entry in enumerate(review):
-            _render_card(entry, saved_keys, len(eligible) + offset)
+            _render_card(entry, saved_keys, len(eligible) + offset, candidate, profile)
     if rejected:
         with st.expander(f"Excluded jobs ({len(rejected)}) with reasons"):
             for entry in rejected:
