@@ -10,6 +10,7 @@ the single request and never persisted or displayed.
 
 import math
 import re
+import urllib.parse
 
 import streamlit as st
 
@@ -293,6 +294,55 @@ def widget_key(key, prefix, position):
     return f"{prefix}-{safe}-{position}"
 
 
+def _valid_direct_url(url):
+    """Defensive check for a stored direct apply URL (pure, no network).
+
+    Mirrors the extractor's safety rules so old cached records with
+    missing, malformed, or unsafe values fall back to the listing link.
+    """
+    if not isinstance(url, str) or not url.strip():
+        return False
+    text = url.strip()
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:
+        return False
+    if parts.scheme.lower() not in ("http", "https"):
+        return False
+    host = (parts.hostname or "").lower()
+    if not host or "." not in host:
+        return False
+    if re.search(r"\s", text):
+        return False
+    return True
+
+
+def resolve_apply_links(job):
+    """Split a job dict into (direct, listing) URLs (pure).
+
+    ``direct`` is the verified ``direct_apply_url`` when valid, else
+    None (old cached records lacking the field safely yield None).
+    ``listing`` is ``apply_url`` falling back to ``source_url``. Never
+    raises, never fabricates.
+    """
+    if not isinstance(job, dict):
+        return None, None
+    direct = job.get("direct_apply_url")
+    direct = direct.strip() if isinstance(direct, str) else None
+    if not direct or not _valid_direct_url(direct):
+        direct = None
+    listing = job.get("apply_url") or job.get("source_url")
+    listing = listing.strip() if isinstance(listing, str) else None
+    if not listing:
+        listing = None
+    return direct, listing
+
+
+def _source_label(job):
+    source = job.get("source") if isinstance(job, dict) else None
+    return f"via {source}" if isinstance(source, str) and source.strip() else "via provider"
+
+
 # ---------------------------------------------------------------- pure pipeline
 def describe_fetch_outcome(fetched):
     """Compose honest fetch messages from a fetch_all_jobs result (pure).
@@ -470,9 +520,16 @@ def _render_card(entry, saved_keys=frozenset(), position=0):
     missing = match.get("missing_skills") or []
     st.write(f"**Matched:** {', '.join(matched) if matched else '—'}")
     st.write(f"**Missing:** {', '.join(missing) if missing else '—'}")
-    url = job.get("apply_url") or job.get("source_url")
-    if url:
-        st.link_button("Apply (original listing)", url)
+    direct, listing = resolve_apply_links(job)
+    if direct:
+        st.link_button("Apply Direct (Company)", direct)
+        if listing and listing != direct:
+            st.link_button(f"Listing Page ({_source_label(job)})", listing)
+        else:
+            st.caption(f"Original listing ({_source_label(job)}) is the same link.")
+    elif listing:
+        st.link_button(f"Open Listing ({_source_label(job)})", listing)
+        st.caption("No direct company application link identified — apply on the original listing page.")
     else:
         st.caption("No application link was provided by this source.")
     key = tracking.tracking_key(job)
@@ -529,9 +586,14 @@ def render_saved_page(candidate):
             )
             if meta:
                 st.caption(meta)
-            url = job.get("apply_url") or job.get("source_url")
-            if url:
-                st.link_button("Apply (original listing)", url)
+            direct, listing = resolve_apply_links(job)
+            if direct:
+                st.link_button("Apply Direct (Company)", direct)
+                if listing and listing != direct:
+                    st.link_button(f"Listing Page ({_source_label(job)})", listing)
+            elif listing:
+                st.link_button(f"Open Listing ({_source_label(job)})", listing)
+                st.caption("No direct company application link identified — apply on the original listing page.")
             else:
                 st.caption("No application link was recorded for this job.")
             status = st.selectbox(
