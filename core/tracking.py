@@ -273,13 +273,15 @@ def clean_application_store(raw):
     return kept, skipped
 
 
-def draft_cover_letter(job, candidate):
+def draft_cover_letter(job, candidate, profile=None):
     """Draft a concise cover letter from actual profile + job data only.
 
     Uses the real title/company/location when available (neutral
     placeholders otherwise), skills genuinely shared with the listing,
     and experience only when the candidate value is a valid number.
-    Never invents qualifications, achievements, or history.
+    An optional sanitized application profile appends a real contact
+    footer (name + contact lines) — never invented. Never invents
+    qualifications, achievements, or history.
     """
     job = job if isinstance(job, dict) else {}
     candidate = candidate if isinstance(candidate, dict) else {}
@@ -328,5 +330,15 @@ def draft_cover_letter(job, candidate):
         paragraphs.append(f"My background includes {listed}.")
     if years_valid:
         paragraphs.append(f"I have {float(years):g} years of relevant experience.")
-    paragraphs += ["Thank you for your consideration.", "Sincerely,\n[Your Name]"]
+    paragraphs += ["Thank you for your consideration."]
+    footer = []
+    profile = profile if isinstance(profile, dict) else {}
+    name = profile.get("full_name") if isinstance(profile.get("full_name"), str) else ""
+    if name and name.strip():
+        footer.append(name.strip())
+    for key in ("email", "phone", "location", "linkedin_url", "portfolio_url"):
+        value = profile.get(key)
+        if isinstance(value, str) and value.strip():
+            footer.append(value.strip())
+    paragraphs.append("Sincerely,\n" + ("\n".join(footer) if footer else "[Your Name]"))
     return "\n\n".join(paragraphs)

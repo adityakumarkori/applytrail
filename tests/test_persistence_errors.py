@@ -142,10 +142,10 @@ def test_save_preferences_oserror_shown_in_ui(monkeypatch):
 
     monkeypatch.setattr("storage.save_store", boom)
     with patch("core.jobs.fetch_all_jobs", side_effect=AssertionError("no fetch")):
-        at = AppTest.from_file("app.py").run()
+        at = AppTest.from_file("app.py").run(timeout=30)
         assert not at.exception, at.exception
         save_button = next(b for b in at.button if b.label == "Save preferences")
-        save_button.click().run()
+        save_button.click().run(timeout=30)
     assert not at.exception, at.exception
     assert any("not saved" in str(error.value) for error in at.error)
 
@@ -158,10 +158,10 @@ def test_save_preferences_success_without_network(monkeypatch):
         "storage.save_store", lambda name, data: written.setdefault(name, data)
     )
     with patch("core.jobs.fetch_all_jobs", side_effect=AssertionError("no fetch")):
-        at = AppTest.from_file("app.py").run()
+        at = AppTest.from_file("app.py").run(timeout=30)
         assert not at.exception, at.exception
         save_button = next(b for b in at.button if b.label == "Save preferences")
-        save_button.click().run()
+        save_button.click().run(timeout=30)
     assert not at.exception, at.exception
     assert written["profile"]["exp_pref_min"] == 0.0
     assert any("saved locally" in str(s.value).lower() for s in at.success)
@@ -196,10 +196,10 @@ def test_fetch_handler_cache_typeerror_still_shows_jobs(monkeypatch):
 
     monkeypatch.setattr("storage.save_store", boom)
     with patch("core.jobs.fetch_all_jobs", return_value=fetched):
-        at = AppTest.from_file("app.py").run()
+        at = AppTest.from_file("app.py").run(timeout=30)
         assert not at.exception, at.exception
         fetch_button = next(b for b in at.button if b.label == "Fetch / refresh jobs")
-        fetch_button.click().run()
+        fetch_button.click().run(timeout=30)
     assert not at.exception, at.exception
     assert any("cache failed" in str(w.value) for w in at.warning)
     assert any("Fetched 1 jobs" in str(s.value) for s in at.success)

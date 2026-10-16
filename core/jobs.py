@@ -17,7 +17,10 @@ Providers (all GET, JSON, polite single-shot calls with timeouts):
 
 Attribution: every normalized job keeps its provider name in `source`
 and the original listing page in `source_url` — the future UI must
-display both (required by RemoteOK/Remotive terms).
+display both (required by RemoteOK/Remotive terms). A separate
+optional `direct_apply_url` holds a real company application URL only
+when one can be reliably extracted from the already-fetched
+description; it is None otherwise and never overwrites `source_url`.
 
 Never fabricate: items missing both title and URL are skipped (None);
 unknown fields become None/"unknown", never invented values.
@@ -45,6 +48,7 @@ JOB_KEYS = (
     "source",
     "source_url",
     "apply_url",
+    "direct_apply_url",
     "posted_date",
     "fetched_at",
 )
@@ -52,6 +56,97 @@ JOB_KEYS = (
 
 class SourceError(Exception):
     """Transport or response-validation failure for one job source."""
+
+
+# ATS hosts treated as direct company application pages when a full
+# HTTP(S) URL is present in an already-fetched description. Suffix
+# match so regional subdomains keep working. A bare hostname with no
+# URL is never enough (extraction returns None in that case).
+_ATS_SUFFIXES = (
+    "boards.greenhouse.io",
+    "lever.co",
+    "ashbyhq.com",
+    "myworkdayjobs.com",
+    "workday.com",
+    "smartrecruiters.com",
+    "icims.com",
+    "jobvite.com",
+)
+
+_URL_RE = re.compile(r"https?://[^\s\"'<>\)\]\[]+")
+_APPLY_HINT_RE = re.compile(r"apply", re.IGNORECASE)
+
+
+def _clean_url_candidate(raw):
+    """Trim trailing punctuation/HTML artifacts; unescape &amp;."""
+    text = (raw or "").replace("&amp;", "&").strip()
+    # Strip trailing sentence/HTML/markdown punctuation, not URL internals.
+    while text and text[-1] in ".,;:!?)]}'\"":
+        text = text[:-1]
+    # Strip a stray opening wrap left by "(<url>" style text.
+    while text and text[0] in "(<[":
+        text = text[1:]
+    return text
+
+
+def _valid_http_url(url):
+    """True when url is a usable absolute HTTP(S) URL with a dotted host."""
+    if not isinstance(url, str):
+        return False
+    text = url.strip()
+    if not text:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:
+        return False
+    if parts.scheme.lower() not in ("http", "https"):
+        return False
+    host = (parts.hostname or "").lower()
+    if not host or "." not in host:
+        return False
+    if not parts.path and not parts.query:
+        # Host-only URLs (e.g. "https://boards.greenhouse.io") carry no
+        # job-specific target; still a real URL but not a direct apply link.
+        # Keep them out to avoid overstating "direct application" proof.
+        return False
+    if re.search(r"\s", text):
+        return False
+    return True
+
+
+def _is_ats_url(url):
+    """True when a validated URL sits on a supported ATS host."""
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == suffix or host.endswith("." + suffix) for suffix in _ATS_SUFFIXES)
+
+
+def extract_direct_apply_url(description):
+    """Extract one direct company application URL from description text.
+
+    Pure, stdlib-only, never fetches. Scans already-fetched
+    descriptions for the first HTTP(S) URL that is either on a
+    supported ATS host (Greenhouse, Lever, Ashby, Workday,
+    SmartRecruiters, iCIMS, Jobvite) or explicitly framed as an apply
+    link (the ~60 chars before it mention "apply"). Malformed, unsafe
+    (non-http(s)), hostless, or ambiguous text returns None. Never
+    invents links and never treats a bare ATS hostname as a URL.
+    """
+    if not isinstance(description, str) or not description.strip():
+        return None
+    for match in _URL_RE.finditer(description):
+        candidate = _clean_url_candidate(match.group(0))
+        if not _valid_http_url(candidate):
+            continue
+        if _is_ats_url(candidate):
+            return candidate
+        window_start = max(0, match.start() - 60)
+        if _APPLY_HINT_RE.search(description[window_start:match.start()]):
+            return candidate
+    return None
 
 
 def _now_iso():
@@ -174,6 +269,7 @@ def _base_job(source, external_id, title, url):
         "source": source,
         "source_url": url or None,
         "apply_url": url or None,
+        "direct_apply_url": None,
     }
 
 
@@ -197,6 +293,7 @@ def normalize_arbeitnow_item(raw, now=None):
             location or "", description, " ".join(map(str, tags)), remote_flag=remote_flag
         ),
         "description": description,
+        "direct_apply_url": extract_direct_apply_url(description),
         "posted_date": _iso_from_any(raw.get("created_at")),
         "fetched_at": now,
     }
@@ -226,6 +323,7 @@ def normalize_remoteok_item(raw, now=None):
             location or "", description, " ".join(map(str, tags)), remote_flag=True
         ),
         "description": description,
+        "direct_apply_url": extract_direct_apply_url(description),
         "posted_date": posted,
         "fetched_at": now,
     }
@@ -248,6 +346,7 @@ def normalize_remotive_item(raw, now=None):
         "location": location,
         "work_mode": deduce_work_mode(location or "", description, category),
         "description": description,
+        "direct_apply_url": extract_direct_apply_url(description),
         "posted_date": _iso_from_any(raw.get("publication_date")),
         "fetched_at": now,
     }
@@ -273,6 +372,7 @@ def normalize_adzuna_item(raw, now=None):
         "location": location_name,
         "work_mode": deduce_work_mode(location_name or "", description),
         "description": description,
+        "direct_apply_url": extract_direct_apply_url(description),
         "posted_date": _iso_from_any(raw.get("created")),
         "fetched_at": now,
     }

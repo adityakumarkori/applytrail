@@ -324,6 +324,7 @@ def _stub_job(source, job_id, url):
         "source": source,
         "source_url": url,
         "apply_url": url,
+        "direct_apply_url": None,
         "posted_date": None,
         "fetched_at": "t",
     }
